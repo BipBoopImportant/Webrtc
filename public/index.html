@@ -1,237 +1,86 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebRTC Viewer Client</title>
+    <title>TeslaTouch Stream</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background: #000;
-            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            overflow: hidden;
-        }
-
-        #videoContainer {
-            position: relative;
-            width: 100vw;
-            height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        #remoteVideo {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            background: #1a1a1a;
-        }
-
-        #touchOverlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: transparent;
-            z-index: 10;
-        }
-
-        #status {
-            position: absolute;
-            top: 20px;
-            left: 20px;
-            background: rgba(0, 0, 0, 0.8);
-            color: white;
-            padding: 10px 15px;
-            border-radius: 8px;
-            font-size: 14px;
-            z-index: 20;
-        }
-
-        .status-connected { color: #10b981; }
-        .status-connecting { color: #f59e0b; }
-        .status-disconnected { color: #ef4444; }
+        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; background-color: #000; }
+        #video-container { position: relative; width: 100%; height: 100%; }
+        video { width: 100%; height: 100%; object-fit: contain; }
+        #touch-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; }
     </style>
 </head>
 <body>
-    <div id="videoContainer">
-        <video id="remoteVideo" autoplay playsinline muted></video>
-        <div id="touchOverlay"></div>
-        <div id="status">Connecting...</div>
+    <div id="video-container">
+        <video id="videoElement" autoplay playsinline muted></video>
+        <div id="touch-overlay"></div>
     </div>
 
     <script>
-        class WebRTCViewer {
-            constructor() {
-                this.ws = null;
-                this.pc = null;
-                this.dataChannel = null;
-                this.remoteVideo = document.getElementById('remoteVideo');
-                this.touchOverlay = document.getElementById('touchOverlay');
-                this.status = document.getElementById('status');
+        const videoElement = document.getElementById('videoElement');
+        const touchOverlay = document.getElementById('touch-overlay');
+        const params = new URLSearchParams(window.location.search);
+        const mode = params.get('mode') || 'webrtc'; // Default to webrtc (Hotspot mode)
 
-                this.init();
+        if (mode === 'hls') {
+            // --- INTERNET MODE (HLS) ---
+            console.log("Starting in HLS (Internet) Mode");
+            document.getElementById('touch-overlay').style.display = 'none'; // No touch in this mode
+            const videoSrc = '/live/stream/index.m3u8';
+            if (Hls.isSupported()) {
+                const hls = new Hls();
+                hls.loadSource(videoSrc);
+                hls.attachMedia(videoElement);
+            } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+                videoElement.src = videoSrc;
             }
+        } else {
+            // --- HOTSPOT MODE (WebRTC) ---
+            console.log("Starting in WebRTC (Hotspot) Mode");
+            const ws = new WebSocket(`wss://${window.location.host}/webrtc`);
+            const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+            let touchDataChannel;
 
-            init() {
-                this.setupWebSocket();
-                this.setupPeerConnection();
-                this.setupTouchHandling();
-                this.updateStatus('Connecting...', 'connecting');
-            }
+            pc.ontrack = (event) => {
+                videoElement.srcObject = event.streams[0];
+            };
 
-            setupWebSocket() {
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const wsUrl = `${protocol}//${window.location.host}`;
-
-                this.ws = new WebSocket(wsUrl);
-
-                this.ws.onopen = () => {
-                    console.log('WebSocket connected');
-                    this.updateStatus('WebSocket Connected', 'connected');
-                };
-
-                this.ws.onmessage = (event) => {
-                    const message = JSON.parse(event.data);
-                    this.handleSignalingMessage(message);
-                };
-
-                this.ws.onclose = () => {
-                    console.log('WebSocket disconnected');
-                    this.updateStatus('Disconnected', 'disconnected');
-                };
-
-                this.ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
-                    this.updateStatus('Connection Error', 'disconnected');
-                };
-            }
-
-            setupPeerConnection() {
-                this.pc = new RTCPeerConnection({
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
-                });
-
-                // Handle incoming tracks
-                this.pc.ontrack = (event) => {
-                    console.log('Received remote track');
-                    this.remoteVideo.srcObject = event.streams[0];
-                    this.updateStatus('Stream Connected', 'connected');
-                };
-
-                // Handle ICE candidates
-                this.pc.onicecandidate = (event) => {
-                    if (event.candidate) {
-                        this.sendSignalingMessage({
-                            type: 'ice-candidate',
-                            candidate: event.candidate
-                        });
-                    }
-                };
-
-                // Handle data channel
-                this.pc.ondatachannel = (event) => {
-                    const channel = event.channel;
-                    console.log('Data channel received:', channel.label);
-                };
-            }
-
-            setupTouchHandling() {
-                this.touchOverlay.addEventListener('touchstart', (e) => {
-                    e.preventDefault();
-                    this.sendTouchEvent('touchstart', e.touches);
-                });
-
-                this.touchOverlay.addEventListener('touchmove', (e) => {
-                    e.preventDefault();
-                    this.sendTouchEvent('touchmove', e.touches);
-                });
-
-                this.touchOverlay.addEventListener('touchend', (e) => {
-                    e.preventDefault();
-                    this.sendTouchEvent('touchend', e.changedTouches);
-                });
-
-                // Mouse events for desktop testing
-                this.touchOverlay.addEventListener('mousedown', (e) => {
-                    this.sendTouchEvent('touchstart', [{ clientX: e.clientX, clientY: e.clientY }]);
-                });
-
-                this.touchOverlay.addEventListener('mousemove', (e) => {
-                    if (e.buttons > 0) {
-                        this.sendTouchEvent('touchmove', [{ clientX: e.clientX, clientY: e.clientY }]);
-                    }
-                });
-
-                this.touchOverlay.addEventListener('mouseup', (e) => {
-                    this.sendTouchEvent('touchend', [{ clientX: e.clientX, clientY: e.clientY }]);
-                });
-            }
-
-            sendTouchEvent(type, touches) {
-                const touchData = Array.from(touches).map(touch => ({
-                    x: touch.clientX / window.innerWidth,
-                    y: touch.clientY / window.innerHeight
-                }));
-
-                const message = {
-                    type: 'touch',
-                    event: type,
-                    touches: touchData,
-                    timestamp: Date.now()
-                };
-
-                if (this.dataChannel && this.dataChannel.readyState === 'open') {
-                    this.dataChannel.send(JSON.stringify(message));
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    ws.send(JSON.stringify({ type: 'ice-candidate', candidate: event.candidate }));
                 }
-            }
+            };
+            
+            pc.ondatachannel = (event) => {
+                touchDataChannel = event.channel;
+                setupTouchControls();
+            };
 
-            async handleSignalingMessage(message) {
-                try {
-                    switch (message.type) {
-                        case 'offer':
-                            await this.pc.setRemoteDescription(message.offer);
-                            const answer = await this.pc.createAnswer();
-                            await this.pc.setLocalDescription(answer);
-                            this.sendSignalingMessage({
-                                type: 'answer',
-                                answer: answer
-                            });
-                            break;
-
-                        case 'ice-candidate':
-                            await this.pc.addIceCandidate(message.candidate);
-                            break;
-
-                        default:
-                            console.log('Unknown message type:', message.type);
-                    }
-                } catch (error) {
-                    console.error('Error handling signaling message:', error);
+            ws.onmessage = async (event) => {
+                const message = JSON.parse(event.data);
+                if (message.type === 'offer') {
+                    await pc.setRemoteDescription(new RTCSessionDescription(message.sdp));
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    ws.send(JSON.stringify({ type: 'answer', sdp: pc.localDescription }));
+                } else if (message.type === 'ice-candidate') {
+                    await pc.addIceCandidate(new RTCIceCandidate(message.candidate));
                 }
-            }
+            };
 
-            sendSignalingMessage(message) {
-                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                    this.ws.send(JSON.stringify(message));
+            function setupTouchControls() {
+                function sendTouchEvent(type, e) {
+                    if (!touchDataChannel || touchDataChannel.readyState !== 'open') return;
+                    const rect = touchOverlay.getBoundingClientRect();
+                    const x = (e.clientX - rect.left) / rect.width;
+                    const y = (e.clientY - rect.top) / rect.height;
+                    if (x < 0 || x > 1 || y < 0 || y > 1) return;
+                    touchDataChannel.send(JSON.stringify({ type, x, y }));
                 }
-            }
-
-            updateStatus(text, type) {
-                this.status.textContent = text;
-                this.status.className = `status-${type}`;
+                touchOverlay.addEventListener('mousedown', e => sendTouchEvent('down', e));
+                touchOverlay.addEventListener('mouseup', e => sendTouchEvent('up', e));
             }
         }
-
-        // Initialize when page loads
-        window.addEventListener('load', () => {
-            new WebRTCViewer();
-        });
     </script>
 </body>
+</html>
